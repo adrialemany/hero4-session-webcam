@@ -117,7 +117,9 @@ GoPro (10.5.5.9)                         PC
 ```
 
 - **Camera control.** The script talks to the camera's HTTP API at `10.5.5.9`. It asks for the live stream (`gpStream`, protocol v2), polls the camera status, and detects when the camera disappears or comes back.
-- **Keepalive.** The camera only keeps sending video while it believes a client is watching. The script sends a small UDP keepalive packet (`_GPHD_:0:0:2:0.000000`, the same format the camera's own streaming software uses) to port 8554 every second. Without it the camera stops the stream after a few seconds. The script also polls the status endpoint while waiting for the first frame, because the Session does not start sending video until it registers a connected client.
+- **Keepalive.** The camera only keeps sending video while it believes a client is watching. Two heartbeats are needed:
+  - A small UDP packet (`_GPHD_:0:0:2:0.000000`, the same format the camera's own streaming software uses) sent to port 8554 every second. Without it the camera stops the stream after a few seconds.
+  - HTTP requests to the status endpoint, like the official app makes. The Session does not start sending video until it registers a connected client (status `31` >= 1), which only happens after the status endpoint is polled. And while streaming, if it receives no HTTP requests for about 5 minutes, it considers the app gone: its screen shows **CONNECTION LOST** and it restarts its WiFi. The script therefore polls the status every 2.5 seconds for the whole session (`--app-poll`).
 - **Decoder (reader).** An `ffmpeg` process receives the UDP MPEG-TS stream, decodes the H.264 video, applies the image filters and scales it to a fixed output size. This process is disposable: it is restarted whenever the stream stalls.
 - **Pump.** A Python thread forwards every decoded frame to the writer as soon as it arrives (low-latency mode). If no fresh frame has arrived for 1.5 seconds, it sends the standby image instead, at the configured frame rate, so applications never see a frozen or dead camera.
 - **Writer.** A second `ffmpeg` process owns `/dev/video10` for the entire life of the script. The device format never changes, so applications do not break when the camera disconnects, reconnects or restarts its stream. Because the writer starts immediately, the webcam is listed in applications even before the camera is turned on.
@@ -200,6 +202,7 @@ Options are passed to `start_gopro_cam.sh` (which forwards them to the Python sc
 | `--no-low-latency` | off | Disable the low-latency optimizations (more conservative buffering and timing). |
 | `--stall-timeout S` | `6` | Seconds without video before restarting the stream. |
 | `--first-frame-timeout S` | `25` | Seconds to wait for the first frame after requesting the stream. |
+| `--app-poll S` | `2.5` | Poll the camera status every S seconds while streaming, like the official app. Prevents the periodic CONNECTION LOST. `0` disables it. |
 | `--info` / `--probe` | | Measure what the camera sends (resolution, fps, bitrate) and exit. |
 | `--dump` | | Print the camera's full status and settings as JSON and exit. |
 | `--stream-bitrate BPS` | | Experimental: request a stream bitrate (setting 62). Ignored by the Session in testing. |
@@ -270,6 +273,10 @@ A copy is already running (often the one started at login). Run `./start_gopro_c
 - The script must be running (`pgrep -af gopro_session_webcam`).
 - Some applications only scan for cameras at startup: restart the application.
 - Try `--pixfmt yuyv422`.
+
+**The camera shows CONNECTION LOST every few minutes**
+
+The camera drops clients that stop making HTTP requests. Make sure `--app-poll` is not set to `0`. If it still happens, run with `-v`: a warning `Estado 31 (clientes registrados) = 0 durante el stream` means the camera stopped counting the PC as a client; also check `journalctl -b -u NetworkManager` around the time of the drop for WiFi disconnections, and disable power saving on the WiFi adapter used for the camera.
 
 **Laggy or choppy image**
 

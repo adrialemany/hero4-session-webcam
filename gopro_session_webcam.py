@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import argparse
 import collections
 import json
@@ -24,6 +22,7 @@ FRESH = 1.5
 COOL_DOWN = 120
 CACHE_DIR = os.path.expanduser("~/.cache/gopro-session")
 FFMPEG = os.environ.get("GOPRO_FFMPEG", "ffmpeg")
+
 
 class Camera:
     def __init__(self, host, mac=None):
@@ -123,6 +122,7 @@ class KeepAlive(threading.Thread):
 
     def stop(self):
         self._stop_evt.set()
+
 
 class Proc:
     def __init__(self, name, cmd, stdin=None, stdout=None):
@@ -376,6 +376,7 @@ def _mtime(path):
     except OSError:
         return None
 
+
 class Bridge:
     def __init__(self, cfg, cam):
         self.cfg, self.cam = cfg, cam
@@ -562,6 +563,7 @@ class Bridge:
                 t0 = time.time()
                 last_31 = None
                 got, hot, last_thermal, last_report = False, False, 0.0, t0
+                last_poll = 0.0
                 dec_died = False
                 frames_at_report = self.nframes
                 reason = "parada solicitada"
@@ -589,7 +591,22 @@ class Bridge:
                     if now - ref > limit:
                         reason = ("sin fotogramas durante %.0f s" % (now - ref))
                         break
-                    if cfg.thermal_guard and now - last_thermal >= 10:
+                    if got and cfg.app_poll > 0 and now - last_poll >= cfg.app_poll:
+                        last_poll = now
+                        st = cam.status()
+                        if st is None:
+                            log.debug("Latido: la camara no contesto a /status")
+                        else:
+                            n31 = st.get("status", {}).get("31")
+                            if n31 != last_31 and n31 is not None:
+                                (log.warning if str(n31) == "0" else log.debug)(
+                                    "Estado 31 (clientes registrados) = %s durante el stream", n31)
+                                last_31 = n31
+                            if cfg.thermal_guard and str(st.get("status", {}).get("6")) == "1":
+                                reason, hot = "camara demasiado caliente", True
+                                break
+                    elif cfg.thermal_guard and now - last_thermal >= 10 and (
+                            not got or cfg.app_poll <= 0):
                         last_thermal = now
                         st = cam.status()
                         if st and str(st.get("status", {}).get("6")) == "1":
@@ -638,7 +655,7 @@ class Bridge:
                 cam.stop_stream()
             except Exception:
                 pass
-    
+
     def run(self):
         self.start_writer()
         threading.Thread(target=self.pump_event if self.cfg.low_latency else self.pump,
@@ -744,7 +761,6 @@ def probe_stream(cfg, cam, secs=6):
         return
     codec, prof, w, h = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
     fps = re.search(r"([\d.]+) (?:fps|tbr)", err.split("Stream #0:", 1)[1])
-
     rates = []
     for i, (t1, b1) in enumerate(samples):
         for t2, b2 in samples[i + 1:]:
@@ -766,6 +782,7 @@ def probe_stream(cfg, cam, secs=6):
     if abs(w / h - ow / oh) / (ow / oh) > 0.03:
         print(f"Formato de la camara {w}:{h} distinto del de salida {ow}:{oh}: "
               f"ahora se aplica --fit {cfg.fit} (pad=barras, crop=recortar, stretch=deformar).")
+
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -804,6 +821,9 @@ def parse_args():
                    help="s de espera al primer fotograma tras pedir el stream")
     p.add_argument("--keepalive-port", type=int, default=UDP_PORT,
                    help=argparse.SUPPRESS)
+    p.add_argument("--app-poll", type=float, default=2.5, metavar="S",
+                   help="consulta /status cada S s durante el stream, como la app oficial; "
+                        "evita el 'CONNECTION LOST' periodico de la camara (0 = desactivado)")
     p.add_argument("--mac", help="MAC de la camara para Wake-on-LAN (se aprende sola)")
     p.add_argument("--no-autooff", action="store_true",
                    help="intenta desactivar el apagado automatico (sin verificar)")
